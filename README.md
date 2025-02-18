@@ -28,13 +28,13 @@ pip install -e .
 ### 2. Конфигурация окружения
 Создайте файл `.env`:
 ```env
-# LLM Configuration
-OPENAI_API_KEY=your_api_key_here
-OPENAI_API_BASE=https://your-vllm-server/v1
-OPENAI_MODEL=your_model_name
-
 # Search API Configuration
 TAVILY_API_KEY=your_tavily_key_here
+
+# LLM Configuration
+LLM_API_KEY=your_api_key_here
+LLM_API_BASE=https://your-vllm-server/v1
+LOCAL_LLM=your_model_name
 ```
 
 ### 3. Запуск
