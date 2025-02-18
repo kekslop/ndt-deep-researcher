@@ -1,5 +1,4 @@
 import json
-import os
 import requests
 from typing import Dict, Literal
 from typing_extensions import Literal
@@ -54,8 +53,13 @@ REFLECTION_SCHEMA = {
 }
 
 
-def make_llm_request(prompt: str, schema: Dict, system_prompt: str = None) -> Dict:
+def make_llm_request(prompt: str, schema: Dict, system_prompt: str = None, config: RunnableConfig = None) -> Dict:
     """Make a structured request to the LLM."""
+    configuration = Configuration.from_runnable_config(config)
+
+    if not configuration.llm_api_base or not configuration.llm_api_key:
+        raise ValueError("LLM API Base URL and API Key must be configured")
+
     messages = [
         {"role": "system", "content": system_prompt or "You are a helpful assistant."},
         {"role": "user", "content": prompt}
@@ -63,7 +67,7 @@ def make_llm_request(prompt: str, schema: Dict, system_prompt: str = None) -> Di
 
     request_data = {
         "messages": messages,
-        "model": os.getenv("OPENAI_MODEL"),
+        "model": configuration.local_llm,
         "max_tokens": 2000,
         "temperature": 0,
         "guided_json": json.dumps(schema),
@@ -72,12 +76,16 @@ def make_llm_request(prompt: str, schema: Dict, system_prompt: str = None) -> Di
 
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}"
+        "Authorization": f"Bearer {configuration.llm_api_key}"
     }
 
     try:
+        url = f"{configuration.llm_api_base.rstrip('/')}/chat/completions"
+        print(f"Making LLM request to: {url}")
+        print(f"Using model: {configuration.local_llm}")
+
         response = requests.post(
-            f"{os.getenv('OPENAI_API_BASE')}/chat/completions",
+            url,
             json=request_data,
             headers=headers
         )
@@ -96,7 +104,8 @@ def detect_language(state: SummaryState, config: RunnableConfig):
     result = make_llm_request(
         prompt=language_detection_instructions.format(input_text=state.research_topic),
         schema=LANGUAGE_SCHEMA,
-        system_prompt="You are a language detection expert."
+        system_prompt="You are a language detection expert.",
+        config=config
     )
 
     print(f"Detected language: {result['language']} ({result['language_code']})")
@@ -116,7 +125,8 @@ def generate_query(state: SummaryState, config: RunnableConfig):
     result = make_llm_request(
         prompt=f"Generate a query for web search in {state.language}:",
         schema=QUERY_SCHEMA,
-        system_prompt=query_writer_instructions_formatted
+        system_prompt=query_writer_instructions_formatted,
+        config=config
     )
 
     return {"search_query": result["query"]}
@@ -124,10 +134,10 @@ def generate_query(state: SummaryState, config: RunnableConfig):
 
 def web_research(state: SummaryState, config: RunnableConfig):
     """Gather information from the web."""
-    configurable = Configuration.from_runnable_config(config)
-    search_api = (configurable.search_api.value
-                  if not isinstance(configurable.search_api, str)
-                  else configurable.search_api)
+    configuration = Configuration.from_runnable_config(config)
+    search_api = (configuration.search_api.value
+                  if not isinstance(configuration.search_api, str)
+                  else configuration.search_api)
 
     print(f"Using search API: {search_api}")
     print(f"Search query ({state.language}): {state.search_query}")
@@ -141,7 +151,7 @@ def web_research(state: SummaryState, config: RunnableConfig):
         search_str = deduplicate_and_format_sources(search_results, max_tokens_per_source=1000,
                                                     include_raw_content=False)
     else:
-        raise ValueError(f"Unsupported search API: {configurable.search_api}")
+        raise ValueError(f"Unsupported search API: {search_api}")
 
     return {
         "sources_gathered": [format_sources(search_results)],
@@ -171,7 +181,8 @@ def summarize_sources(state: SummaryState, config: RunnableConfig):
     result = make_llm_request(
         prompt=prompt,
         schema=SUMMARY_SCHEMA,
-        system_prompt=summarizer_instructions
+        system_prompt=summarizer_instructions,
+        config=config
     )
 
     return {"running_summary": result["summary"]}
@@ -191,7 +202,8 @@ def reflect_on_summary(state: SummaryState, config: RunnableConfig):
         system_prompt=reflection_instructions.format(
             research_topic=state.research_topic,
             language=state.language
-        )
+        ),
+        config=config
     )
 
     return {"search_query": result["follow_up_query"]}
@@ -200,14 +212,18 @@ def reflect_on_summary(state: SummaryState, config: RunnableConfig):
 def finalize_summary(state: SummaryState):
     """Finalize the summary."""
     all_sources = "\n".join(source for source in state.sources_gathered)
-    state.running_summary = f"## Research Topic\n{state.research_topic}\n\n## Summary\n\n{state.running_summary}\n\n### Sources:\n{all_sources}"
-    return {"running_summary": state.running_summary}
+    final_summary = (
+        f"## Research Topic\n{state.research_topic}\n\n"
+        f"## Summary\n\n{state.running_summary}\n\n"
+        f"### Sources:\n{all_sources}"
+    )
+    return {"running_summary": final_summary}
 
 
 def route_research(state: SummaryState, config: RunnableConfig) -> Literal["finalize_summary", "web_research"]:
     """Route the research based on the follow-up query."""
-    configurable = Configuration.from_runnable_config(config)
-    if state.research_loop_count <= configurable.max_web_research_loops:
+    configuration = Configuration.from_runnable_config(config)
+    if state.research_loop_count <= configuration.max_web_research_loops:
         return "web_research"
     else:
         return "finalize_summary"
@@ -217,7 +233,7 @@ def route_research(state: SummaryState, config: RunnableConfig) -> Literal["fina
 builder = StateGraph(SummaryState, input=SummaryStateInput, output=SummaryStateOutput, config_schema=Configuration)
 
 # Add nodes
-builder.add_node("detect_language", detect_language)  # New language detection node
+builder.add_node("detect_language", detect_language)
 builder.add_node("generate_query", generate_query)
 builder.add_node("web_research", web_research)
 builder.add_node("summarize_sources", summarize_sources)
@@ -225,8 +241,8 @@ builder.add_node("reflect_on_summary", reflect_on_summary)
 builder.add_node("finalize_summary", finalize_summary)
 
 # Add edges
-builder.add_edge(START, "detect_language")  # Start with language detection
-builder.add_edge("detect_language", "generate_query")  # Then proceed to query generation
+builder.add_edge(START, "detect_language")
+builder.add_edge("detect_language", "generate_query")
 builder.add_edge("generate_query", "web_research")
 builder.add_edge("web_research", "summarize_sources")
 builder.add_edge("summarize_sources", "reflect_on_summary")
