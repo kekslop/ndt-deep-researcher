@@ -1,0 +1,4 @@
+.env
+.DS_Store
+ollama_deep_researcher.egg-info
+.langgraph_api
